@@ -124,7 +124,6 @@ class NR_GraphAttention(Layer):
                 rels_sum = tf.SparseTensor(indices=sparse_indices, values=sparse_val, dense_shape=(self.triple_size,self.rel_size))
                 
                 rels_sum = tf.sparse_tensor_dense_matmul(rels_sum, rel_emb)
-                print(rels_sum)
                 neighs = K.gather(features, adj.indices[:, 1])
                 selfs = K.gather(features, adj.indices[:, 0])
                 
@@ -152,7 +151,6 @@ class NR_GraphAttention(Layer):
             outputs.append(features)
         
         outputs = K.concatenate(outputs)
-        print(outputs.shape)
         proxy_att = K.dot(tf.nn.l2_normalize(outputs, axis=-1), K.transpose(tf.nn.l2_normalize(self.proxy,axis=-1)))
         proxy_att = K.softmax(proxy_att, axis=-1)
         proxy_feature = outputs - K.dot(proxy_att, self.proxy)

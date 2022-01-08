@@ -1,15 +1,19 @@
+from dgl_version import *
+import dgl
 import numpy as np
+import torch
+import time
 from utils import *
-from models import *
 from evaluate import evaluate
 from tqdm import *
-import torch
-import keras.backend as KTF
+
+
 gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
 config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 # config.gpu_options.per_process_gpu_memory_fraction = 0.3
 sess = tf.compat.v1.Session(config=config)
 tf.compat.v1.keras.backend.set_session(sess)
+
 train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/ja_en/", train_ratio=0.30)
 adj_matrix = np.stack(adj_matrix.nonzero(), axis=1)
 rel_matrix, rel_val = np.stack(rel_features.nonzero(), axis=1), rel_features.data
@@ -26,7 +30,9 @@ lr = 0.005
 gamma = 1
 depth = 2
 device = 'cuda'
-# model.eval()
+print('adj_matrix', adj_matrix)
+print('rel_matrix', r_index)
+
 def get_embedding(index_a, index_b, vec):
     vec = vec.detach().numpy()
     Lvec = np.array([vec[e] for e in index_a])
@@ -78,13 +84,34 @@ def align_loss(align_input, embedding):
     r_loss = torch.logsumexp(lamb * r_loss + tau, dim=-1)
     return torch.mean(l_loss + r_loss)
 
+def constructRelGraph(r_index, rel_size):
+    src, trg = [], []
+    for index in r_index:
+        src.append(index[1])
+        trg.append(index[0])
+    return dgl.heterograph({
+        ('relation', 'in', 'index'): (torch.tensor(src), torch.tensor(trg)), })
+
+
+def constructGraph(adj_matrix):
+    src, trg = adj_matrix[:, 0], adj_matrix[:, 1]
+    print(len(src))
+    print(len(r_index))
+    # todo src trg
+    g = dgl.graph((src, trg))
+    # g = dgl.graph(( trg,src))
+    return g
+
+g = constructGraph(adj_matrix)
+g_r = constructRelGraph(r_index, rel_size)
+
+
 print('begin')
 #inputs = [adj_input, index_input, val_input, rel_adj, ent_adj]
-inputs = [adj_matrix, r_index, r_val, rel_matrix, ent_matrix]
-model = OverAll(node_size=node_size, node_hidden=node_hidden,
-                 rel_size=rel_size, rel_hidden=rel_hidden,
-                rel_matrix=rel_matrix, ent_matrix=ent_matrix,
-                triple_size=triple_size, dropout_rate=dropout_rate,
+
+model = overAll(node_size=node_size, node_hidden=node_hidden,
+                 rel_size=rel_size, rel_matrix=rel_matrix,
+                ent_matrix=ent_matrix, dropout_rate=dropout_rate,
                 depth=depth, device=device)
 model = model.to(device)
 # opt = torch.optim.RMSprop(model.parameters(), lr=lr)
@@ -106,16 +133,16 @@ for turn in range(5):
         for pairs in [train_pair[i * batch_size:(i + 1) * batch_size] for i in
                       range(len(train_pair) // batch_size + 1)]:
             inputs = [adj_matrix, r_index, r_val, rel_matrix, ent_matrix]
-            output = model(inputs)
+            output = model(g, g_r)
             # print(output)
             loss = align_loss(pairs, output)
             print(loss)
             opt.zero_grad()
             loss.backward()
             opt.step()
-        if i %5==4:
+        if i %5 == 4:
             model.eval()
-            output = model(inputs)
+            output = model(g, g_r)
             Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1], output.cpu())
             evaluater.test(Lvec, Rvec)
             model.train()
@@ -135,6 +162,3 @@ for turn in range(5):
         if e2 in rest_set_2:
             rest_set_2.remove(e2)
     epoch = 5
-
-# Hits@1:  9.523809523809524e-05   Hits@5:  0.0015238095238095239   Hits@10:  0.002380952380952381
-# Hits@1:  0.7191428571428572   Hits@5:  0.8829523809523809   Hits@10:  0.9198095238095239   MRR:  0.7921462749629521

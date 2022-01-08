@@ -4,7 +4,6 @@ warnings.filterwarnings('ignore')
 import os
 import keras
 import numpy as np
-import numba as nb
 from utils import *
 from tqdm import *
 from evaluate import evaluate
@@ -163,7 +162,7 @@ def get_trgat(node_hidden, rel_hidden, triple_size=triple_size, node_size=node_s
         # r_loss = K.logsumexp(lamb * r_loss + tau, axis=-1)
         l_loss = tf.reduce_logsumexp(lamb * l_loss + tau, axis=-1)
         r_loss = tf.reduce_logsumexp(lamb * r_loss + tau, axis=-1)
-        final_loss=  K.mean(l_loss + r_loss)
+        final_loss = K.mean(l_loss + r_loss)
 
         print(final_loss)
         return final_loss
@@ -206,7 +205,8 @@ for turn in range(5):
             inputs = [adj_matrix, r_index, r_val, rel_matrix, ent_matrix, pairs]
             # what the fuck
             inputs = [np.expand_dims(item, axis=0) for item in inputs]
-            model.train_on_batch(inputs, np.zeros((1, 1)))
+            output = model.train_on_batch(inputs, np.zeros((1, 1)))
+            print(output)
         if i == epoch - 1:
             Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1])
             evaluater.test(Lvec, Rvec)
