@@ -21,8 +21,8 @@ class overAll(nn.Module):
         self.rel_adj = self.get_spares_matrix_by_index(rel_matrix, (node_size, rel_size),self.device)
         self.dropout_rate = dropout_rate
         self.depth = depth
-        self.ent_emb = self.init_emb(node_size, node_hidden)
-        self.rel_emb = self.init_emb(rel_size, node_hidden)
+        self.ent_emb = self.init_emb(node_size, node_hidden,init_func= 'uniform')
+        self.rel_emb = self.init_emb(rel_size, node_hidden,init_func='uniform')
 
     @staticmethod
     def get_spares_matrix_by_index(index, size, device='cuda'):
@@ -36,12 +36,19 @@ class overAll(nn.Module):
     def init_emb(*size, init_func='xavier'):
         # TODO BIAS
         entities_emb = nn.Parameter(torch.randn(size))
-        torch.nn.init.xavier_normal_(entities_emb)
+        if init_func == 'xavier':
+            torch.nn.init.xavier_normal_(entities_emb)
+        elif init_func=='zero':
+            torch.nn.init.zeros_(entities_emb)
+        elif init_func=='uniform':
+            torch.nn.init.uniform_(entities_emb, -.05, .05)
+        else:
+            raise NotImplementedError
         return entities_emb
 
     def forward(self, g, g_r):
-        g=g.to(self.device)
-        g_r= g_r.to(self.device)
+        g = g.to(self.device)
+        g_r = g_r.to(self.device)
         # inputs = [adj_matrix, r_index, r_val, rel_matrix, ent_matrix, train_pairs]
         ent_feature = torch.matmul(self.ent_adj, self.ent_emb)
         rel_feature = torch.matmul(self.rel_adj, self.rel_emb)
@@ -51,7 +58,7 @@ class overAll(nn.Module):
         out_feature_rel = self.r_encoder(g, g_r, rel_feature, self.rel_emb)
         out_feature = torch.cat((out_feature_ent, out_feature_rel), dim=-1)
         # todo: DROPOUT SCALE
-        out_feature = F.dropout(out_feature, p=self.dropout_rate)
+        out_feature = F.dropout(out_feature, p=self.dropout_rate, training=self.training)
         return out_feature
 
 class Dual(nn.Module):
@@ -76,7 +83,7 @@ class Dual(nn.Module):
         self.gate_kernel = overAll.init_emb(ent_F * (self.depth + 1), ent_F * (self.depth + 1))
         self.proxy = overAll.init_emb(64, node_F * (self.depth + 1))
         if self.use_bias:
-            self.bias = overAll.init_emb(1, ent_F * (self.depth + 1))
+            self.bias = overAll.init_emb(1, ent_F * (self.depth + 1), init_func='zero')
         for d in range(self.depth):
             attn_kernel = overAll.init_emb(node_F, 1)
             self.attn_kernels.append(attn_kernel.to(device))

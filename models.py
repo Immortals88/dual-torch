@@ -12,6 +12,7 @@ class Embedding_init(nn.Module):
         entities_emb = nn.Parameter(w)
         return entities_emb
 
+
 class OverAll(nn.Module):
     def __init__(self, node_size, node_hidden,
                  rel_size, rel_hidden,
@@ -41,7 +42,7 @@ class OverAll(nn.Module):
     def get_spares_matrix_by_index(index, size):
         index = torch.LongTensor(index)
         adj = torch.sparse.FloatTensor(torch.transpose(index, 0, 1),
-                                       torch.ones_like(index[:, 0], dtype=torch.float), size)
+                                       torch.ones_like(index[:, 0], dtype=torch.float), size    )
         # dim ??
         return torch.sparse.softmax(adj, dim=1)
 
@@ -65,7 +66,7 @@ class OverAll(nn.Module):
         out_feature_ent = self.e_encoder([ent_feature] + opt)
         out_feature_rel = self.r_encoder([rel_feature] + opt)
         out_feature = torch.cat((out_feature_ent, out_feature_rel), dim=-1)
-        out_feature = F.dropout(out_feature, p=self.dropout_rate)
+        out_feature = F.dropout(out_feature, p=self.dropout_rate, training=self.training)
         return out_feature
 
 

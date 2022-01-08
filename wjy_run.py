@@ -88,7 +88,7 @@ model = OverAll(node_size=node_size, node_hidden=node_hidden,
                 depth=depth, device=device)
 model = model.to(device)
 # opt = torch.optim.RMSprop(model.parameters(), lr=lr)
-opt = torch.optim.Adam(model.parameters(), lr=lr)
+opt = torch.optim.RMSprop(model.parameters(), lr=lr)
 print('model constructed')
 
 evaluater = evaluate(dev_pair)

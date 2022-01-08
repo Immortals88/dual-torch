@@ -207,7 +207,7 @@ for turn in range(5):
             inputs = [np.expand_dims(item, axis=0) for item in inputs]
             output = model.train_on_batch(inputs, np.zeros((1, 1)))
             print(output)
-        if i == epoch - 1:
+        if i%5==4 :
             Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1])
             evaluater.test(Lvec, Rvec)
         new_pair = []
