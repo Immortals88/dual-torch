@@ -42,7 +42,7 @@ class OverAll(nn.Module):
     def get_spares_matrix_by_index(index, size):
         index = torch.LongTensor(index)
         adj = torch.sparse.FloatTensor(torch.transpose(index, 0, 1),
-                                       torch.ones_like(index[:, 0], dtype=torch.float), size    )
+                                       torch.ones_like(index[:, 0], dtype=torch.float), size)
         # dim ??
         return torch.sparse.softmax(adj, dim=1)
 

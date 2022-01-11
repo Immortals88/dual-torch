@@ -1,4 +1,4 @@
-from dgl_version import *
+from dgl_sample_gcn import *
 import dgl
 import numpy as np
 import torch
@@ -6,6 +6,7 @@ import time
 from utils import *
 from evaluate import evaluate
 from tqdm import *
+from dgl.dataloading import MultiLayerNeighborSampler
 
 
 gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
@@ -30,10 +31,18 @@ lr = 0.005
 gamma = 1
 depth = 2
 device = 'cuda'
+print('adj_matrix', adj_matrix)
+print('rel_matrix', r_index)
 
-print('new_version')
-def get_embedding(index_a, index_b, vec):
-    vec = vec.detach().numpy()
+# newly add
+fanouts = [10] * depth
+
+
+def get_embedding(index_a, index_b, vec=None):
+    if vec is not None:
+        vec = vec.detach().numpy()
+    else:
+        vec = fuck
     Lvec = np.array([vec[e] for e in index_a])
     Rvec = np.array([vec[e] for e in index_b])
     Lvec = Lvec / (np.linalg.norm(Lvec, axis=-1, keepdims=True) + 1e-5)
@@ -47,6 +56,7 @@ def align_loss(align_input, embedding):
         row_norms_A = torch.reshape(row_norms_A, [-1, 1])  # Column vector.
         row_norms_B = torch.sum(torch.square(B), dim=1)
         row_norms_B = torch.reshape(row_norms_B, [1, -1])  # Row vector.
+        # may not work
         return row_norms_A + row_norms_B - 2 * torch.matmul(A, torch.transpose(B, 0, 1))
     # modified
     left = torch.tensor(align_input[:, 0])
@@ -54,8 +64,9 @@ def align_loss(align_input, embedding):
     l_emb = embedding[left]
     r_emb = embedding[right]
     pos_dis = torch.sum(torch.square(l_emb - r_emb), dim=-1, keepdim=True)
-    r_neg_dis = squared_dist([r_emb, embedding])
+
     l_neg_dis = squared_dist([l_emb, embedding])
+    r_neg_dis = squared_dist([r_emb, embedding])
 
     l_loss = pos_dis - l_neg_dis + gamma
     l_loss = l_loss * (1 - F.one_hot(left, num_classes=node_size) - F.one_hot(right, num_classes=node_size)).to(device)
@@ -74,11 +85,15 @@ def align_loss(align_input, embedding):
         #     l_loss, dim=-1, keepdim=True).detach()
 
     lamb, tau = 30, 10
+    # l_loss = K.log(K.sum(K.exp(lamb * l_loss + tau), axis=-1))
+    # r_loss = K.log(K.sum(K.exp(lamb * r_loss + tau), axis=-1))
+    # l_loss = K.logsumexp(lamb * l_loss + tau, axis=-1)
+    # r_loss = K.logsumexp(lamb * r_loss + tau, axis=-1)
     l_loss = torch.logsumexp(lamb * l_loss + tau, dim=-1)
     r_loss = torch.logsumexp(lamb * r_loss + tau, dim=-1)
     return torch.mean(l_loss + r_loss)
 
-def constructRelGraph(r_index):
+def constructRelGraph(r_index, rel_size):
     src, trg = [], []
     for index in r_index:
         src.append(index[1])
@@ -89,28 +104,23 @@ def constructRelGraph(r_index):
 
 def constructGraph(adj_matrix):
     src, trg = adj_matrix[:, 0], adj_matrix[:, 1]
+    print(len(src))
+    print(len(r_index))
     # todo src trg
     g = dgl.graph((src, trg))
     # g = dgl.graph(( trg,src))
     return g
 
-
-def constructNode_Rel_interact(rel_matrix):
-    src, trg = [], []
-    for index in rel_matrix:
-        src.append(index[1])
-        trg.append(index[0])
-    return dgl.heterograph({
-        ('relation', 'link', 'entity'): (torch.tensor(src), torch.tensor(trg)),   })
-
 g = constructGraph(adj_matrix)
-g_r = constructRelGraph(r_index)
-n_r = constructNode_Rel_interact(rel_matrix)
+g_r = constructRelGraph(r_index, rel_size)
+
 
 print('begin')
+#inputs = [adj_input, index_input, val_input, rel_adj, ent_adj]
 
 model = overAll(node_size=node_size, node_hidden=node_hidden,
-                 rel_size=rel_size, dropout_rate=dropout_rate,
+                 rel_size=rel_size, rel_matrix=rel_matrix,
+                ent_matrix=ent_matrix, dropout_rate=dropout_rate,
                 depth=depth, device=device)
 model = model.to(device)
 # opt = torch.optim.RMSprop(model.parameters(), lr=lr)
@@ -123,25 +133,49 @@ rest_set_2 = [e2 for e1, e2 in dev_pair]
 np.random.shuffle(rest_set_1)
 np.random.shuffle(rest_set_2)
 
+# this model merge two KGs into one
+# need a different sampler
+def dataloader(train_pair, batch_size, node_size):
+    pos_node = set(train_pair[:, 0] + train_pair[:, 1])
+    neg_node = list(filter(lambda x: x not in pos_node, range(node_size)))
+    n_bs = int(batch_size*len(neg_node)/len(train_pair))
+    np.random.shuffle(neg_node)
+    for i in range(len(train_pair)//batch_size+1):
+        l = i * batch_size
+        r = l +batch_size if l + batch_size < len(train_pair) else len(train_pair)
+        pairs = train_pair[l: r]
+        # node ID of two KGs is not overlapping
+        l_n = i * n_bs
+        r_n = l_n + n_bs if l_n + n_bs < len(neg_node) else len(neg_node)
+        neg_sample = neg_node[l_n: r_n]
+        yield pairs, neg_sample
+
+def Sampler(g, nodes, fanouts):
+    blocks = MultiLayerNeighborSampler(fanouts).sample_blocks(g, nodes)
+    return blocks
+
+
 
 # here is dual-m
 epoch = 20
 for turn in range(5):
     for i in trange(epoch):
         np.random.shuffle(train_pair)
-        for pairs in [train_pair[i * batch_size:(i + 1) * batch_size] for i in
-                      range(len(train_pair) // batch_size + 1)]:
-            output = model(g, g_r, n_r)
+        for pairs, neg_node in dataloader(train_pair, batch_size, node_size):
+            pos_node = pairs[:, 0]+ pairs[:, 1]
+            print(pos_node)
+            print(neg_node)
+            blocks = Sampler(g, pos_node+neg_node,fanouts)
+            output = model(blocks, g_r)
             # print(output)
-            loss = align_loss(pairs, output)
+            loss = align_loss(pairs, neg_node, output)
             print(loss)
             opt.zero_grad()
             loss.backward()
             opt.step()
-        if i %5 == 4:
+        if i %10 == 9:
             model.eval()
-            output = model(g, g_r, n_r)
-            Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1], output.cpu())
+            Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1])
             evaluater.test(Lvec, Rvec)
             model.train()
         new_pair = []
