@@ -397,6 +397,13 @@ def remain_topk_sim(matrix: Tensor, dim=0, k=1500, split=False):
     val0, ind0 = torch.topk(matrix, dim=1 - dim, k=k)
     return topk2spmat(val0, ind0, matrix.size(), dim, matrix.device, split)
 
+def saveobj(obj, fname):
+    with open(fname, 'wb') as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+def readobj(fname):
+    with open(fname, 'rb') as f:
+        return pickle.load(f)
 
 @torch.no_grad()
 def save_similarity_matrix(sparse=False, **kwargs):
@@ -486,3 +493,58 @@ def update_time_logs(action: str):
     time_logs.append('{0}, {1}, {2}'.format(action, duration, total_time))
     total_time += duration
     curr_time = time.time()
+
+
+
+def my_dist_func(L, R, k=100):
+    dim = len(L[0])
+    import faiss
+    torch.cuda.empty_cache()
+    index = faiss.IndexFlat(dim)
+    index = faiss.index_cpu_to_all_gpus(index)
+    index.add(R)
+    D, I = index.search(L, k)
+    print("FAISS complete")
+    return I
+
+
+def get_hits(em1, em2, test_pair, top_k=(1, 5, 10, 50, 100), partition=1, src_nodes=None, trg_nodes=None):
+    # em1 = em1.cpu().detach().numpy()
+    # em2 = em2.cpu().detach().numpy()
+
+    # em1 = em1 / np.linalg.norm(em1, axis=-1, keepdims=True)
+    # em2 = em2 / np.linalg.norm(em2, axis=-1, keepdims=True)
+    def filter_pair(pair, src, trg):
+        if src is None or trg is None:
+            return pair
+        src = set(src)
+        trg = set(trg)
+        return list(filter(lambda x: x[0] in src and x[1] in trg, pair))
+
+    batch_size = len(test_pair) // partition
+    print(batch_size)
+    total_size = 0
+    top_lr = [0] * len(top_k)
+    for x in range(partition):
+        left = x * batch_size
+        right = left + batch_size if left + batch_size < len(test_pair) else len(test_pair)
+        filtered = filter_pair(test_pair[left:right], src_nodes, trg_nodes)
+        print(len(filtered))
+        if len(filtered) == 0:
+            continue
+        total_size += len(filtered)
+        Lvec = np.array([em1[e1] for e1, e2 in filtered])
+        Rvec = np.array([em2[e2] for e1, e2 in filtered])
+        ranks = my_dist_func(Lvec, Rvec)
+        for i in range(Lvec.shape[0]):
+            rank = ranks[i]
+            rank_index = np.where(rank == i)[0][0] if i in rank else 1000
+            for j in range(len(top_k)):
+                if rank_index < top_k[j]:
+                    top_lr[j] += 1
+    print('For each left:')
+    print('Total size=', total_size)
+    for i in range(len(top_lr)):
+        print('Hits@%d: %.2f%%' % (top_k[i], top_lr[i] / (total_size + 1e-8) * 100))
+
+    return top_k, top_lr, total_size

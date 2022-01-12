@@ -49,8 +49,10 @@ class overAll(nn.Module):
         dst_nodes = blocks[-1].dstdata[dgl.NID]
         # torch.equal(src_nodes[:len(dst_nodes)], dst_nodes
         g = self.g
-        g.ndata['ent_emb'] = self.ent_emb
+        # g.ndata['ent_emb'] = self.ent_emb
         temp_block = MultiLayerFullNeighborSampler(1).sample_blocks(g, src_nodes)[0]
+        temp_block = temp_block.to(self.device)
+        temp_block.srcdata['ent_emb'] = self.ent_emb[temp_block.srcdata[dgl.NID]]
         temp_block.update_all(fn.copy_u('ent_emb', 'm'), fn.mean('m', 'feature'))
         ent_feature = temp_block.dstdata['feature']
 

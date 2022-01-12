@@ -4,11 +4,10 @@ import numpy as np
 import torch
 import time
 from utils import *
-from evaluate import evaluate
 from tqdm import *
 from dgl.dataloading import *
 import torch.nn.functional as F
-
+from util2 import saveobj, readobj
 
 gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
 config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
@@ -16,7 +15,13 @@ config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 sess = tf.compat.v1.Session(config=config)
 tf.compat.v1.keras.backend.set_session(sess)
 
-train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/ja_en/", train_ratio=0.30)
+try:
+    train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = readobj('save.pkl')
+except:
+    train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/fr_en_big/", train_ratio=0.30)
+    saveobj((train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features ), 'save.pkl')
+    train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = readobj('save.pkl')
+
 adj_matrix = np.stack(adj_matrix.nonzero(), axis=1)
 rel_matrix, rel_val = np.stack(rel_features.nonzero(), axis=1), rel_features.data
 ent_matrix, ent_val = np.stack(adj_features.nonzero(), axis=1), adj_features.data
@@ -26,7 +31,7 @@ rel_size = rel_features.shape[1]
 triple_size = len(adj_matrix) # not triple size, but number of diff(h, t)
 node_hidden = 128
 rel_hidden = 128
-batch_size = 1024
+batch_size = 5000
 
 dropout_rate = 0.3
 lr = 0.005
@@ -35,17 +40,33 @@ depth = 2
 device = 'cuda'
 
 # newly add
-fanouts = [10] * depth
-eval_bs = 4000
-neg_bs = 3000
+fanouts = [8] * depth
+eval_bs = 100000
+neg_bs = batch_size*2
+filter_link = True
 
+if filter_link:
+    ent_0, ent_1 = set(), set()
+    filtered = []
+    for link in train_pair:
+        if link[0] in ent_0 or link[1] in ent_1:
+            continue
+        else:
+            ent_0.add(link[0])
+            ent_1.add(link[1])
+            filtered.append(link)
+    print(f'remain ratio = {len(filtered)/len(train_pair)}')
+    print(train_pair)
+    train_pair = np.array(filtered)
+    print(train_pair)
 
+@torch.no_grad()
 def get_embedding(index_a, index_b, vec=None):
     if vec is not None:
         vec = vec.detach().numpy()
     else:
         vec = []
-        for i in range(0, node_size, eval_bs):
+        for i in trange(0, node_size, eval_bs):
             r = i+ eval_bs if i + eval_bs < node_size else node_size
             seed = torch.tensor(range(i, r))
             blocks = MultiLayerNeighborSampler(fanouts, return_eids=True).sample_blocks(g, seed)
@@ -136,11 +157,13 @@ def constructNode_Rel_interact(rel_matrix):
     return dgl.heterograph({
         ('relation', 'link', 'entity'): (torch.tensor(src), torch.tensor(trg)), })
 
+print('Construct graph')
+
 g = constructGraph(adj_matrix)
 g_r = constructRelGraph(r_index, rel_size)
 n_r = constructNode_Rel_interact(rel_matrix)
 
-g = g.to(device)
+# g = g.to(device)
 g_r = g_r.to(device)
 n_r = n_r.to(device)
 
@@ -157,7 +180,7 @@ model = model.to(device)
 opt = torch.optim.Adam(model.parameters(), lr=lr)
 print('model constructed')
 
-evaluater = evaluate(dev_pair)
+# evaluater = evaluate(dev_pair)
 rest_set_1 = [e1 for e1, e2 in dev_pair]
 rest_set_2 = [e2 for e1, e2 in dev_pair]
 np.random.shuffle(rest_set_1)
@@ -179,6 +202,8 @@ def dataloader(train_pair, batch_size, node_size, neg_bs = None):
         l = i * batch_size
         r = l +batch_size if l + batch_size < len(train_pair) else len(train_pair)
         pairs = train_pair[l: r]
+
+
         # node ID of two KGs is not overlapping
         l_n = i * n_bs
         r_n = l_n + n_bs if l_n + n_bs < len(neg_node) else len(neg_node)
@@ -188,7 +213,7 @@ def dataloader(train_pair, batch_size, node_size, neg_bs = None):
 
 # here is dual-m
 epoch = 50
-for turn in range(5):
+for turn in range(1):
     for i in trange(epoch):
         np.random.shuffle(train_pair)
         for pairs, neg_node in dataloader(train_pair, batch_size, node_size, neg_bs):
@@ -211,26 +236,27 @@ for turn in range(5):
             opt.zero_grad()
             loss.backward()
             opt.step()
-        if i %10 == 9:
-            model.eval()
-            Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1])
-            evaluater.test(Lvec, Rvec)
-            model.train()
+        # if i %10 == 9:
+        model.eval()
+        Lvec, Rvec = get_embedding(dev_pair[:, 0], dev_pair[:, 1])
+        from util2 import get_hits
+        get_hits(Lvec, Rvec, np.array(list( zip(range(len(Lvec)), range(len(Rvec))))))
+        model.train()
         new_pair = []
     model.eval()
     Lvec, Rvec = get_embedding(rest_set_1, rest_set_2)
     model.train()
-    A, B = evaluater.CSLS_cal(Lvec, Rvec, False)
-    for i, j in enumerate(A):
-        if B[j] == i:
-            new_pair.append([rest_set_1[j], rest_set_2[i]])
-
-    train_pair = np.concatenate([train_pair, np.array(new_pair)], axis=0)
-    for e1, e2 in new_pair:
-        if e1 in rest_set_1:
-            rest_set_1.remove(e1)
-
-    for e1, e2 in new_pair:
-        if e2 in rest_set_2:
-            rest_set_2.remove(e2)
-    epoch = 5
+    # A, B = evaluater.CSLS_cal(Lvec, Rvec, False)
+    # for i, j in enumerate(A):
+    #     if B[j] == i:
+    #         new_pair.append([rest_set_1[j], rest_set_2[i]])
+    #
+    # train_pair = np.concatenate([train_pair, np.array(new_pair)], axis=0)
+    # for e1, e2 in new_pair:
+    #     if e1 in rest_set_1:
+    #         rest_set_1.remove(e1)
+    #
+    # for e1, e2 in new_pair:
+    #     if e2 in rest_set_2:
+    #         rest_set_2.remove(e2)
+    # epoch = 5
