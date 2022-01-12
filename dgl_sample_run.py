@@ -6,7 +6,8 @@ import time
 from utils import *
 from evaluate import evaluate
 from tqdm import *
-from dgl.dataloading import MultiLayerNeighborSampler
+from dgl.dataloading import *
+import torch.nn.functional as F
 
 
 gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
@@ -15,7 +16,7 @@ config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 sess = tf.compat.v1.Session(config=config)
 tf.compat.v1.keras.backend.set_session(sess)
 
-train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/ja_en/", train_ratio=0.30)
+train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/en_fr_15k_V1/", train_ratio=0.30)
 adj_matrix = np.stack(adj_matrix.nonzero(), axis=1)
 rel_matrix, rel_val = np.stack(rel_features.nonzero(), axis=1), rel_features.data
 ent_matrix, ent_val = np.stack(adj_features.nonzero(), axis=1), adj_features.data
@@ -31,8 +32,6 @@ lr = 0.005
 gamma = 1
 depth = 2
 device = 'cuda'
-print('adj_matrix', adj_matrix)
-print('rel_matrix', r_index)
 
 # newly add
 fanouts = [10] * depth
@@ -42,14 +41,14 @@ def get_embedding(index_a, index_b, vec=None):
     if vec is not None:
         vec = vec.detach().numpy()
     else:
-        vec = fuck
+        vec = None
     Lvec = np.array([vec[e] for e in index_a])
     Rvec = np.array([vec[e] for e in index_b])
     Lvec = Lvec / (np.linalg.norm(Lvec, axis=-1, keepdims=True) + 1e-5)
     Rvec = Rvec / (np.linalg.norm(Rvec, axis=-1, keepdims=True) + 1e-5)
     return Lvec, Rvec
 
-def align_loss(align_input, embedding):
+def align_loss(batch_size, neg_size, embedding):
     def squared_dist(x):
         A, B = x
         row_norms_A = torch.sum(torch.square(A), dim=1)
@@ -59,10 +58,13 @@ def align_loss(align_input, embedding):
         # may not work
         return row_norms_A + row_norms_B - 2 * torch.matmul(A, torch.transpose(B, 0, 1))
     # modified
-    left = torch.tensor(align_input[:, 0])
-    right = torch.tensor(align_input[:, 1])
+    left = torch.tensor(range(batch_size))
+    right = torch.tensor(range(batch_size, batch_size + batch_size))
+    # print(left, right)
+
     l_emb = embedding[left]
     r_emb = embedding[right]
+    node_size = 2* (batch_size+neg_size)
     pos_dis = torch.sum(torch.square(l_emb - r_emb), dim=-1, keepdim=True)
 
     l_neg_dis = squared_dist([l_emb, embedding])
@@ -85,10 +87,6 @@ def align_loss(align_input, embedding):
         #     l_loss, dim=-1, keepdim=True).detach()
 
     lamb, tau = 30, 10
-    # l_loss = K.log(K.sum(K.exp(lamb * l_loss + tau), axis=-1))
-    # r_loss = K.log(K.sum(K.exp(lamb * r_loss + tau), axis=-1))
-    # l_loss = K.logsumexp(lamb * l_loss + tau, axis=-1)
-    # r_loss = K.logsumexp(lamb * r_loss + tau, axis=-1)
     l_loss = torch.logsumexp(lamb * l_loss + tau, dim=-1)
     r_loss = torch.logsumexp(lamb * r_loss + tau, dim=-1)
     return torch.mean(l_loss + r_loss)
@@ -108,19 +106,38 @@ def constructGraph(adj_matrix):
     print(len(r_index))
     # todo src trg
     g = dgl.graph((src, trg))
+
+    # try
+    s1 = set(src)
+    s2 = set(trg)
+    s = s1.union(s2)
+    print('len:', len(s))
     # g = dgl.graph(( trg,src))
     return g
 
+def constructNode_Rel_interact(rel_matrix):
+    src, trg = [], []
+    for index in rel_matrix:
+        src.append(index[1])
+        trg.append(index[0])
+    return dgl.heterograph({
+        ('relation', 'link', 'entity'): (torch.tensor(src), torch.tensor(trg)), })
+
 g = constructGraph(adj_matrix)
 g_r = constructRelGraph(r_index, rel_size)
+n_r = constructNode_Rel_interact(rel_matrix)
+
+g = g.to(device)
+g_r = g_r.to(device)
+n_r = n_r.to(device)
 
 
 print('begin')
 #inputs = [adj_input, index_input, val_input, rel_adj, ent_adj]
 
 model = overAll(node_size=node_size, node_hidden=node_hidden,
-                 rel_size=rel_size, rel_matrix=rel_matrix,
-                ent_matrix=ent_matrix, dropout_rate=dropout_rate,
+                 rel_size=rel_size, g=g, g_r=g_r, n_r=n_r,
+                dropout_rate=dropout_rate,
                 depth=depth, device=device)
 model = model.to(device)
 # opt = torch.optim.RMSprop(model.parameters(), lr=lr)
@@ -135,10 +152,11 @@ np.random.shuffle(rest_set_2)
 
 # this model merge two KGs into one
 # need a different sampler
+
 def dataloader(train_pair, batch_size, node_size):
-    pos_node = set(train_pair[:, 0] + train_pair[:, 1])
+    pos_node = set(np.hstack((train_pair[:, 0], train_pair[:, 1])).tolist())
     neg_node = list(filter(lambda x: x not in pos_node, range(node_size)))
-    n_bs = int(batch_size*len(neg_node)/len(train_pair))
+    n_bs = batch_size*2
     np.random.shuffle(neg_node)
     for i in range(len(train_pair)//batch_size+1):
         l = i * batch_size
@@ -150,11 +168,6 @@ def dataloader(train_pair, batch_size, node_size):
         neg_sample = neg_node[l_n: r_n]
         yield pairs, neg_sample
 
-def Sampler(g, nodes, fanouts):
-    blocks = MultiLayerNeighborSampler(fanouts).sample_blocks(g, nodes)
-    return blocks
-
-
 
 # here is dual-m
 epoch = 20
@@ -162,13 +175,21 @@ for turn in range(5):
     for i in trange(epoch):
         np.random.shuffle(train_pair)
         for pairs, neg_node in dataloader(train_pair, batch_size, node_size):
-            pos_node = pairs[:, 0]+ pairs[:, 1]
-            print(pos_node)
-            print(neg_node)
-            blocks = Sampler(g, pos_node+neg_node,fanouts)
-            output = model(blocks, g_r)
-            # print(output)
-            loss = align_loss(pairs, neg_node, output)
+            pos_node = np.hstack((pairs[:, 0], pairs[:, 1]))
+            seed = np.hstack((pos_node, neg_node))
+
+            # print(len(seed))
+            # print(len(set(seed)))
+            # s_p_0 = set(pairs[:, 0])
+            # s_p_1 = set(pairs[:, 1])
+            # print(f'left:{len(s_p_0)}, right:{len(s_p_1)}')
+            # print(f'len of pos node:{len(pos_node)}, len of uni pos:{len(s_p_1.union(s_p_0))}')
+
+            blocks = MultiLayerNeighborSampler(fanouts).sample_blocks(g, torch.from_numpy(seed))
+            # print('block', blocks)
+            blocks = [block.to(device) for block in blocks]
+            output = model(blocks)
+            loss = align_loss(len(pairs), batch_size, output)
             print(loss)
             opt.zero_grad()
             loss.backward()

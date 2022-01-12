@@ -45,12 +45,11 @@ class overAll(nn.Module):
         n_r.nodes['relation'].data['emb'] = self.rel_emb
         n_r['link'].update_all(fn.copy_u('emb', 'm'), fn.mean('m', 'r_neigh'), etype='link')
         rel_feature = n_r.nodes['entity'].data['r_neigh']
-        # rel_feature = torch.matmul(self.rel_adj, self.rel_emb)
 
         out_feature_ent = self.e_encoder(g, g_r, ent_feature, self.rel_emb)
         out_feature_rel = self.r_encoder(g, g_r, rel_feature, self.rel_emb)
         out_feature = torch.cat((out_feature_ent, out_feature_rel), dim=-1)
-        # todo: DROPOUT SCALE
+
         out_feature = F.dropout(out_feature, p=self.dropout_rate, training=self.training)
         return out_feature
 
@@ -68,7 +67,6 @@ class Dual(nn.Module):
         self.use_bias = use_bias
         self.attn_kernels = []
 
-        # try
         node_F = 128
         rel_F = 128
         self.ent_F = node_F

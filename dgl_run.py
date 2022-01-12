@@ -101,7 +101,7 @@ def constructNode_Rel_interact(rel_matrix):
         src.append(index[1])
         trg.append(index[0])
     return dgl.heterograph({
-        ('relation', 'link', 'entity'): (torch.tensor(src), torch.tensor(trg)),   })
+        ('relation', 'link', 'entity'): (torch.tensor(src), torch.tensor(trg)), })
 
 g = constructGraph(adj_matrix)
 g_r = constructRelGraph(r_index)

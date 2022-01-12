@@ -77,7 +77,7 @@ def load_data(lang, train_ratio = 0.3):
     entity1, rel1, triples1 = load_triples(lang + 'triples_1')
     entity2, rel2, triples2 = load_triples(lang + 'triples_2')
     # modified here #
-    if "_en" in lang or True:
+    if "_en" in lang:
         alignment_pair = load_alignment_pair(lang + 'ref_ent_ids')
         np.random.shuffle(alignment_pair)
         train_pair, dev_pair = alignment_pair[0:int(len(alignment_pair)*train_ratio)], alignment_pair[int(len(alignment_pair)*train_ratio):]
