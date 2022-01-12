@@ -16,7 +16,7 @@ config = tf.compat.v1.ConfigProto(gpu_options=gpu_options)
 sess = tf.compat.v1.Session(config=config)
 tf.compat.v1.keras.backend.set_session(sess)
 
-train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/en_fr_15k_V1/", train_ratio=0.30)
+train_pair, dev_pair, adj_matrix, r_index, r_val, adj_features, rel_features = load_data("data/ja_en/", train_ratio=0.30)
 adj_matrix = np.stack(adj_matrix.nonzero(), axis=1)
 rel_matrix, rel_val = np.stack(rel_features.nonzero(), axis=1), rel_features.data
 ent_matrix, ent_val = np.stack(adj_features.nonzero(), axis=1), adj_features.data
@@ -27,6 +27,7 @@ triple_size = len(adj_matrix) # not triple size, but number of diff(h, t)
 node_hidden = 128
 rel_hidden = 128
 batch_size = 1024
+
 dropout_rate = 0.3
 lr = 0.005
 gamma = 1
@@ -35,13 +36,24 @@ device = 'cuda'
 
 # newly add
 fanouts = [10] * depth
+eval_bs = 4000
+neg_bs = 3000
 
 
 def get_embedding(index_a, index_b, vec=None):
     if vec is not None:
         vec = vec.detach().numpy()
     else:
-        vec = None
+        vec = []
+        for i in range(0, node_size, eval_bs):
+            r = i+ eval_bs if i + eval_bs < node_size else node_size
+            seed = torch.tensor(range(i, r))
+            blocks = MultiLayerNeighborSampler(fanouts, return_eids=True).sample_blocks(g, seed)
+            blocks = [block.to(device) for block in blocks]
+            output = model(blocks)
+            vec.append(output.cpu())
+        vec = torch.cat(vec, dim=0)
+        vec = vec.detach().numpy()
     Lvec = np.array([vec[e] for e in index_a])
     Rvec = np.array([vec[e] for e in index_b])
     Lvec = Lvec / (np.linalg.norm(Lvec, axis=-1, keepdims=True) + 1e-5)
@@ -64,13 +76,14 @@ def align_loss(batch_size, neg_size, embedding):
 
     l_emb = embedding[left]
     r_emb = embedding[right]
-    node_size = 2* (batch_size+neg_size)
+    node_size = 2 * batch_size + neg_size
     pos_dis = torch.sum(torch.square(l_emb - r_emb), dim=-1, keepdim=True)
 
     l_neg_dis = squared_dist([l_emb, embedding])
     r_neg_dis = squared_dist([r_emb, embedding])
 
     l_loss = pos_dis - l_neg_dis + gamma
+
     l_loss = l_loss * (1 - F.one_hot(left, num_classes=node_size) - F.one_hot(right, num_classes=node_size)).to(device)
 
     r_loss = pos_dis - r_neg_dis + gamma
@@ -153,10 +166,14 @@ np.random.shuffle(rest_set_2)
 # this model merge two KGs into one
 # need a different sampler
 
-def dataloader(train_pair, batch_size, node_size):
+def dataloader(train_pair, batch_size, node_size, neg_bs = None):
     pos_node = set(np.hstack((train_pair[:, 0], train_pair[:, 1])).tolist())
     neg_node = list(filter(lambda x: x not in pos_node, range(node_size)))
-    n_bs = batch_size*2
+
+    if neg_bs is None:
+        n_bs = batch_size * 2
+    else:
+        n_bs = neg_bs
     np.random.shuffle(neg_node)
     for i in range(len(train_pair)//batch_size+1):
         l = i * batch_size
@@ -170,11 +187,11 @@ def dataloader(train_pair, batch_size, node_size):
 
 
 # here is dual-m
-epoch = 20
+epoch = 50
 for turn in range(5):
     for i in trange(epoch):
         np.random.shuffle(train_pair)
-        for pairs, neg_node in dataloader(train_pair, batch_size, node_size):
+        for pairs, neg_node in dataloader(train_pair, batch_size, node_size, neg_bs):
             pos_node = np.hstack((pairs[:, 0], pairs[:, 1]))
             seed = np.hstack((pos_node, neg_node))
 
@@ -185,11 +202,11 @@ for turn in range(5):
             # print(f'left:{len(s_p_0)}, right:{len(s_p_1)}')
             # print(f'len of pos node:{len(pos_node)}, len of uni pos:{len(s_p_1.union(s_p_0))}')
 
-            blocks = MultiLayerNeighborSampler(fanouts).sample_blocks(g, torch.from_numpy(seed))
+            blocks = MultiLayerNeighborSampler(fanouts, return_eids=True).sample_blocks(g, torch.from_numpy(seed))
             # print('block', blocks)
             blocks = [block.to(device) for block in blocks]
             output = model(blocks)
-            loss = align_loss(len(pairs), batch_size, output)
+            loss = align_loss(len(pairs), neg_bs, output)
             print(loss)
             opt.zero_grad()
             loss.backward()
@@ -200,7 +217,9 @@ for turn in range(5):
             evaluater.test(Lvec, Rvec)
             model.train()
         new_pair = []
-    Lvec, Rvec = get_embedding(rest_set_1, rest_set_2, output.cpu())
+    model.eval()
+    Lvec, Rvec = get_embedding(rest_set_1, rest_set_2)
+    model.train()
     A, B = evaluater.CSLS_cal(Lvec, Rvec, False)
     for i, j in enumerate(A):
         if B[j] == i:

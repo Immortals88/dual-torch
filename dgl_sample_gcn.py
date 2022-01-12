@@ -122,16 +122,19 @@ class Dual(nn.Module):
             # print('block edge',torch.vstack(blocks[l].edges()) )
 
             # 这里有问题
-            src_index, trg_index = blocks[l].edges()
-            x,y = max(src_index)+1, max(trg_index)+1
-            att = torch.sparse.FloatTensor(torch.vstack(blocks[l].edges()), att1,
-                                           (blocks[l].number_of_src_nodes(), blocks[l].number_of_dst_nodes()))
-
-            from util2 import sparse_softmax
-            att = sparse_softmax(att,0)
+            #
+            # blocks[l].edata['att'] = att1
+            # blocks[l].apply_edges(fn.ed)
+            # att = torch.sparse.FloatTensor(torch.vstack(blocks[l].edges()), att1,
+            #                                (blocks[l].number_of_src_nodes(), blocks[l].number_of_dst_nodes()))
+            from dgl.nn.functional import edge_softmax
+            att = edge_softmax(blocks[l], att1.flatten(), norm_by='dst')
+            # from util2 import sparse_softmax
+            # att = sparse_softmax(att,1)
             # att = torch.sparse.softmax(att, dim=0)
 
-            new_feature = neighs * torch.unsqueeze(att._values(), dim=-1)
+            # new_feature = neighs * torch.unsqueeze(att._values(), dim=-1)
+            new_feature = neighs * torch.unsqueeze(att, dim=-1)
             blocks[l].edata['feat'] = new_feature
 
 
